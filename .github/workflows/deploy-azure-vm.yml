@@ -1,0 +1,129 @@
+# .github/workflows/deploy-azure-vm.yml
+name: Deploy Azure VM with Terraform
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'Terraform action to perform'
+        required: true
+        default: 'apply'
+        type: choice
+        options:
+        - plan
+        - apply
+        - destroy
+      resource_group_name:
+        description: 'Resource Group Name'
+        required: true
+        default: 'rg-vm-deployment'
+        type: string
+      location:
+        description: 'Azure Location'
+        required: true
+        default: 'East US'
+        type: string
+      vm_name:
+        description: 'VM Name'
+        required: true
+        default: 'vm-windows2022'
+        type: string
+      vm_size:
+        description: 'VM Size'
+        required: true
+        default: 'Standard_B2s'
+        type: string
+      admin_username:
+        description: 'Admin Username'
+        required: true
+        default: 'azureuser'
+        type: string
+
+env:
+  TF_VERSION: '1.6.0'
+  WORKING_DIRECTORY: '.'
+
+jobs:
+  terraform:
+    name: 'Terraform ${{ github.event.inputs.action }}'
+    runs-on: ubuntu-latest
+    environment: production
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ env.WORKING_DIRECTORY }}
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Setup Terraform
+      uses: hashicorp/setup-terraform@v3
+      with:
+        terraform_version: ${{ env.TF_VERSION }}
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+    - name: Terraform Format Check
+      id: fmt
+      run: terraform fmt -check
+      continue-on-error: true
+
+    - name: Terraform Init
+      id: init
+      run: terraform init
+
+    - name: Terraform Validate
+      id: validate
+      run: terraform validate -no-color
+
+    - name: Terraform Plan
+      id: plan
+      if: github.event.inputs.action == 'plan' || github.event.inputs.action == 'apply'
+      run: |
+        terraform plan -no-color -input=false \
+          -var="resource_group_name=${{ github.event.inputs.resource_group_name }}" \
+          -var="location=${{ github.event.inputs.location }}" \
+          -var="vm_name=${{ github.event.inputs.vm_name }}" \
+          -var="vm_size=${{ github.event.inputs.vm_size }}" \
+          -var="admin_username=${{ github.event.inputs.admin_username }}" \
+          -var="admin_password=${{ secrets.VM_ADMIN_PASSWORD }}" \
+          -out=tfplan
+      continue-on-error: true
+
+    - name: Terraform Plan Status
+      if: steps.plan.outcome == 'failure'
+      run: exit 1
+
+    - name: Terraform Apply
+      if: github.event.inputs.action == 'apply'
+      run: terraform apply -auto-approve tfplan
+
+    - name: Terraform Destroy Plan
+      id: destroy_plan
+      if: github.event.inputs.action == 'destroy'
+      run: |
+        terraform plan -destroy -no-color -input=false \
+          -var="resource_group_name=${{ github.event.inputs.resource_group_name }}" \
+          -var="location=${{ github.event.inputs.location }}" \
+          -var="vm_name=${{ github.event.inputs.vm_name }}" \
+          -var="vm_size=${{ github.event.inputs.vm_size }}" \
+          -var="admin_username=${{ github.event.inputs.admin_username }}" \
+          -var="admin_password=${{ secrets.VM_ADMIN_PASSWORD }}" \
+          -out=destroy-tfplan
+
+    - name: Terraform Destroy
+      if: github.event.inputs.action == 'destroy'
+      run: terraform apply -auto-approve destroy-tfplan
+
+    - name: Output VM Details
+      if: github.event.inputs.action == 'apply'
+      run: |
+        echo "VM Deployment Complete!"
+        echo "Public IP: $(terraform output -raw public_ip_address)"
+        echo "Private IP: $(terraform output -raw private_ip_address)"
+        echo "RDP Connection: $(terraform output -raw rdp_connection_string)"
